@@ -392,7 +392,19 @@ def execute_tool(name: str, arguments: dict):
 # Agent loop
 # ---------------------------------------------------------
 
-def run_agent(question: str):
+def run_agent(
+    question: str,
+    event_callback=None,
+):
+
+    def emit(event: dict):
+        if event_callback:
+            try:
+                event_callback(event)
+            except Exception as exc:
+                print(
+                    f"Event callback error: {exc}"
+                )
 
     messages = [
         {
@@ -405,13 +417,25 @@ def run_agent(question: str):
         },
     ]
 
-    max_iterations = 8
+    max_iterations = 10
+
+    emit({
+        "type": "agent_started",
+        "message": question,
+    })
 
     for iteration in range(max_iterations):
 
+        cycle = iteration + 1
+
         print(
-            f"\nAgent reasoning cycle {iteration + 1}..."
+            f"\nAgent investigation cycle {cycle}..."
         )
+
+        emit({
+            "type": "cycle",
+            "cycle": cycle,
+        })
 
         response = client.chat.completions.create(
             model=MODEL,
@@ -422,7 +446,9 @@ def run_agent(question: str):
             max_tokens=4096,
         )
 
-        assistant_message = response.choices[0].message
+        assistant_message = (
+            response.choices[0].message
+        )
 
         messages.append(
             assistant_message.model_dump(
@@ -430,45 +456,95 @@ def run_agent(question: str):
             )
         )
 
-        tool_calls = assistant_message.tool_calls
+        tool_calls = (
+            assistant_message.tool_calls
+        )
 
-        # Agent has finished investigating
+        # Investigation complete
         if not tool_calls:
-            return assistant_message.content
+
+            result = (
+                assistant_message.content
+                or
+                "Investigation completed."
+            )
+
+            emit({
+                "type": "agent_completed",
+            })
+
+            return result
 
         for tool_call in tool_calls:
 
-            tool_name = tool_call.function.name
+            tool_name = (
+                tool_call.function.name
+            )
 
             try:
                 arguments = json.loads(
                     tool_call.function.arguments
                 )
-            except json.JSONDecodeError:
+
+            except (
+                json.JSONDecodeError,
+                TypeError,
+            ):
                 arguments = {}
 
             print(
-                f"Agent selected tool: {tool_name}"
+                f"Agent selected tool: "
+                f"{tool_name} "
+                f"with arguments: {arguments}"
             )
 
-            result = execute_tool(
-                tool_name,
-                arguments,
-            )
+            emit({
+                "type": "tool_started",
+                "id": tool_call.id,
+                "tool": tool_name,
+                "arguments": arguments,
+            })
 
-            print(
-                f"Tool completed: {tool_name}"
-            )
+            try:
+
+                result = execute_tool(
+                    tool_name,
+                    arguments,
+                )
+
+                emit({
+                    "type": "tool_completed",
+                    "id": tool_call.id,
+                    "tool": tool_name,
+                })
+
+            except Exception as exc:
+
+                result = (
+                    f"Tool execution error: {exc}"
+                )
+
+                emit({
+                    "type": "tool_failed",
+                    "id": tool_call.id,
+                    "tool": tool_name,
+                    "error": str(exc),
+                })
 
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result,
+                    "content": str(result),
                 }
             )
 
+    emit({
+        "type": "agent_stopped",
+        "reason": "maximum_iterations",
+    })
+
     return (
-        "Investigation reached the maximum number "
-        "of tool iterations."
+        "Investigation reached the maximum "
+        "number of tool iterations."
     )
